@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ClawDoc — A Telegram Bot That Keeps OpenClaw Alive</title>
+  <meta name="description" content="A self-hosted Telegram bot that monitors, diagnoses, and fixes your OpenClaw installation automatically.">
+
+  <!-- Open Graph / Twitter -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://clawdoc.org">
+  <meta property="og:title" content="ClawDoc — A Telegram Bot That Keeps OpenClaw Alive">
+  <meta property="og:description" content="A self-hosted Telegram bot that monitors, diagnoses, and fixes your OpenClaw installation automatically.">
+  <meta property="og:image" content="https://clawdoc.org/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="ClawDoc 🦞🩺">
+  <meta name="twitter:description" content="A self-hosted Telegram bot that keeps your OpenClaw running.">
+  <meta name="twitter:image" content="https://clawdoc.org/og.png">
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    .hero {
+      padding: 80px 0 60px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: 3rem;
+      font-weight: 800;
+      margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .hero h1 span { color: var(--accent); }
+
+    .hero .tagline {
+      font-size: 1.25rem;
+      color: var(--muted);
+      max-width: 540px;
+      margin: 0 auto 28px;
+    }
+
+    .cta-row {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 12px 28px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    .btn-primary { background: var(--accent); color: var(--bg); }
+    .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+
+    section { padding: 48px 0; }
+    section h2 { font-size: 1.5rem; margin-bottom: 28px; text-align: center; }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 560px) {
+      .feature-grid { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 2rem; }
+    }
+
+    .feature {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .feature .icon { font-size: 1.5rem; margin-bottom: 8px; }
+    .feature h3 { font-size: 1rem; margin-bottom: 6px; }
+    .feature p { font-size: 0.875rem; color: var(--muted); line-height: 1.5; }
+
+    .diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.8;
+      text-align: center;
+    }
+
+    .diagram .highlight { color: var(--accent); }
+    .diagram .green { color: var(--green); }
+
+    .steps { max-width: 480px; margin: 0 auto; }
+
+    .step {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 20px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      background: var(--accent);
+      color: var(--bg);
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.85rem;
+      flex-shrink: 0;
+    }
+
+    .step strong { display: block; margin-bottom: 4px; }
+    .step p { color: var(--muted); font-size: 0.875rem; margin: 0; }
+
+    .install-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 80px 20px 24px;
+      margin: 28px auto 0;
+      max-width: 600px;
+      position: relative;
+    }
+
+    .install-block code {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.9rem;
+      color: var(--green);
+      word-break: break-all;
+    }
+
+    .install-block .copy-btn {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: var(--border);
+      border: none;
+      color: var(--muted);
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+
+    .install-block .copy-btn:hover { background: var(--accent); color: var(--bg); }
+
+    .ai-section { text-align: center; }
+    .ai-section p { color: var(--muted); max-width: 500px; margin: 0 auto 24px; }
+
+    .ai-features {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .ai-tag {
+      background: rgba(88, 166, 255, 0.1);
+      color: var(--accent);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+    }
+
+    footer {
+      padding: 48px 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.875rem;
+      border-top: 1px solid var(--border);
+      margin-top: 48px;
+    }
+
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+
+    <section class="hero">
+      <h1><span>ClawDoc</span> 🦞🩺</h1>
+      <p class="tagline">A self-hosted Telegram bot that keeps your <a href="https://openclaw.ai">OpenClaw</a> running. It monitors, diagnoses, and fixes problems automatically.</p>
+
+      <div class="cta-row" style="margin-top: 32px;">
+        <a href="https://github.com/rungmc357/clawdoc" class="btn btn-primary">GitHub</a>
+        <a href="https://github.com/rungmc357/clawdoc#readme" class="btn btn-secondary">Documentation</a>
+      </div>
+    </section>
+
+    <section class="features">
+      <h2>What you get</h2>
+      <div class="feature-grid">
+        <div class="feature">
+          <div class="icon">👀</div>
+          <h3>Automatic Recovery</h3>
+          <p>ClawDoc checks OpenClaw every 15 minutes. If something breaks, it figures out why, fixes it, and tells you what happened — all before you notice.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">🔄</div>
+          <h3>Remote Control</h3>
+          <p>Restart services, check system health, and view logs from anywhere. Everything is a button tap in Telegram.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">⏪</div>
+          <h3>Config Rollback</h3>
+          <p>Your config is backed up automatically. If an update breaks something, pick any previous version and restore it with one tap.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">🔍</div>
+          <h3>Full Diagnostics</h3>
+          <p>One button runs a complete health check and tells you exactly what's wrong. If it can fix the problem, it gives you a button for that too.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">🌐</div>
+          <h3>Network Monitoring</h3>
+          <p>Watches your connection and notifies you when it drops or comes back, along with how long the outage lasted.</p>
+        </div>
+        <div class="feature">
+          <div class="icon">🔒</div>
+          <h3>Your Bot, Your Machine</h3>
+          <p>Runs locally on your machine and only responds to your Telegram account. Nothing goes through external servers.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="fix-chain">
+      <h2>When something breaks</h2>
+      <p style="color: var(--muted); text-align: center; max-width: 540px; margin: -12px auto 24px;">ClawDoc works through a fix chain automatically, stopping as soon as the problem is resolved:</p>
+      <div class="steps">
+        <div class="step">
+          <span class="step-num" style="background: var(--green);">1</span>
+          <div><p>Check if the config is valid — if it's broken, restore from the most recent backup</p></div>
+        </div>
+        <div class="step">
+          <span class="step-num" style="background: var(--green);">2</span>
+          <div><p>Restart the gateway and verify it comes back healthy</p></div>
+        </div>
+        <div class="step">
+          <span class="step-num" style="background: var(--green);">3</span>
+          <div><p>If that didn't work, run OpenClaw's built-in doctor to repair common issues</p></div>
+        </div>
+        <div class="step">
+          <span class="step-num" style="background: var(--green);">4</span>
+          <div><p>If still down and AI is enabled, diagnose the error logs and try a targeted fix</p></div>
+        </div>
+        <div class="step">
+          <span class="step-num" style="background: var(--green);">5</span>
+          <div><p>If nothing works, message you with exactly what went wrong</p></div>
+        </div>
+      </div>
+      <p style="color: var(--muted); text-align: center; font-size: 0.9rem; margin-top: 8px;">Most issues are resolved at step 1 or 2.</p>
+    </section>
+
+    <section class="how">
+      <h2>Why it works</h2>
+      <div class="diagram">
+        <span class="highlight">OS</span> (launchd / systemd)<br>
+        &nbsp;&nbsp;└── keeps <span class="green">ClawDoc</span> running<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── keeps <span class="highlight">OpenClaw</span> running<br>
+        <br>
+        ClawDoc runs as its own system service, independent of OpenClaw.<br>
+        When OpenClaw goes down, ClawDoc is still there to bring it back.
+      </div>
+    </section>
+
+    <section class="setup">
+      <h2>Get started</h2>
+      <div class="steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <div>
+            <strong>Run the installer</strong>
+            <p>You'll be prompted for a bot token. ClawDoc finds your OpenClaw install automatically.</p>
+          </div>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <div>
+            <strong>Claim your bot in Telegram</strong>
+            <p>Send the claim code, choose your preferences, and you're done.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="install-block">
+        <code>curl -fsSL https://raw.githubusercontent.com/rungmc357/clawdoc/main/install.sh | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/rungmc357/clawdoc/main/install.sh | bash');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)">Copy</button>
+      </div>
+
+      <div style="text-align: center; margin-top: 32px;">
+        <p style="color: var(--muted); font-size: 0.9rem; margin-bottom: 12px;">Or just tell your OpenClaw agent:</p>
+        <div class="install-block" style="margin-top: 0; text-align: left;">
+          <code style="color: var(--accent);">Install ClawDoc on my machine. Read the AGENTS.md at https://github.com/rungmc357/clawdoc for setup instructions.</code>
+          <button class="copy-btn" onclick="navigator.clipboard.writeText('Install ClawDoc on my machine. Read the AGENTS.md at https://github.com/rungmc357/clawdoc for setup instructions.');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="ai-section">
+      <h2>Add AI if you want</h2>
+      <p>Everything works with buttons out of the box. If you have <a href="https://ollama.com">Ollama</a> running locally, ClawDoc can also understand plain English and do smarter diagnostics.</p>
+      <div class="ai-features">
+        <span class="ai-tag">"why is openclaw down?"</span>
+        <span class="ai-tag">Error analysis</span>
+        <span class="ai-tag">Custom skills</span>
+      </div>
+    </section>
+
+  </div>
+
+  <footer>
+    <div class="container">
+      <p>Open source · MIT License · <a href="https://github.com/rungmc357/clawdoc">GitHub</a></p>
+      <p style="margin-top: 8px;">Built by <a href="https://x.com/thatguygeo">@thatguygeo</a></p>
+    </div>
+  </footer>
+
+</body>
+</html>

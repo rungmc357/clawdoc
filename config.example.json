@@ -1,0 +1,24 @@
+{
+  "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "allowed_chat_id": null,
+  "ollama_model": "qwen3.5:4b",
+  "ollama_url": "http://localhost:11434",
+  "shell_security": "disabled",
+  "shell_password_hash": "",
+  "watchdog_interval_min": 15,
+  "network_monitor": true,
+  "transcription": "auto",
+  "log_file": "~/.local/log/clawdoc.log",
+  "skills_file": "~/.config/clawdoc/skills.json",
+  "backup_dir": "~/.config/clawdoc/backups",
+  "watched_services": [
+    {
+      "name": "OpenClaw",
+      "url": "http://localhost:18789/health",
+      "restart_cmd": "openclaw gateway restart",
+      "interval_min": 15,
+      "log_file": "~/.openclaw/logs/gateway.log",
+      "config_files": ["~/.openclaw/openclaw.json"]
+    }
+  ]
+}
