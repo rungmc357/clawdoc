@@ -62,11 +62,12 @@ def save_config(cfg: dict, path: str):
 # Logging
 # ---------------------------------------------------------------------------
 
-def setup_logging(log_file: str):
+def setup_logging(log_file: str, log_level: str = "INFO"):
     log_path = Path(log_file).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
             logging.FileHandler(log_path),
@@ -80,7 +81,7 @@ log = logging.getLogger(__name__)
 # Telegram API
 # ---------------------------------------------------------------------------
 
-def tg_api(bot_token: str, method: str, **params):
+def tg_api(bot_token: str, method: str, _retry: int = 0, **params):
     url = f"https://api.telegram.org/bot{bot_token}/{method}"
     data = json.dumps(params).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -89,6 +90,20 @@ def tg_api(bot_token: str, method: str, **params):
     try:
         with urllib.request.urlopen(req, timeout=http_timeout) as resp:
             return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 429 and _retry < 5:
+            # Rate limited — exponential backoff
+            retry_after = 1
+            try:
+                body = json.loads(e.read())
+                retry_after = body.get("parameters", {}).get("retry_after", 1)
+            except Exception:
+                retry_after = min(2 ** _retry, 30)
+            log.warning(f"Telegram rate limited [{method}], retrying in {retry_after}s")
+            time.sleep(retry_after)
+            return tg_api(bot_token, method, _retry=_retry + 1, **params)
+        log.error(f"Telegram API HTTP error [{method}]: {e.code} {e}")
+        return None
     except urllib.error.URLError as e:
         if "timed out" in str(e).lower():
             log.debug(f"Telegram API timeout [{method}] (normal for long polling)")
@@ -125,6 +140,11 @@ def edit_message(bot_token: str, chat_id: int, message_id: int, text: str):
 
 def answer_callback(bot_token: str, callback_query_id: str, text: str = ""):
     tg_api(bot_token, "answerCallbackQuery", callback_query_id=callback_query_id, text=text)
+
+
+def send_typing(bot_token: str, chat_id: int):
+    """Send 'typing...' indicator so user knows the bot is working."""
+    tg_api(bot_token, "sendChatAction", chat_id=chat_id, action="typing")
 
 
 def send_document(bot_token: str, chat_id: int, file_bytes: bytes, filename: str, caption: str = ""):
@@ -191,7 +211,7 @@ def backup_watched_configs(cfg: dict, backup_dir: Path):
                 existing = sorted(dest_dir.glob(f"{src.name}.*"))
                 for old in existing[:-20]:
                     old.unlink()
-    log.info("Config backups checked")
+    log.debug("Config backups checked")
 
 
 def check_for_updates(install_dir: str) -> bool:
@@ -249,6 +269,51 @@ def run_cmd(cmd: str, timeout: int = 60) -> tuple[str, int]:
         return "(command timed out)", 1
     except Exception as e:
         return f"(error: {e})", 1
+
+# ---------------------------------------------------------------------------
+# Smart character normalization (iOS autocorrect)
+# ---------------------------------------------------------------------------
+
+_SMART_CHAR_MAP = {
+    "\u2014": "--",   # em-dash → double dash
+    "\u2013": "-",    # en-dash → single dash
+    "\u201c": '"',    # left smart quote
+    "\u201d": '"',    # right smart quote
+    "\u2018": "'",    # left smart apostrophe
+    "\u2019": "'",    # right smart apostrophe
+    "\u2026": "...",  # ellipsis
+}
+
+
+def normalize_smart_chars(text: str) -> str:
+    """Replace iOS smart punctuation with their ASCII equivalents."""
+    for smart, plain in _SMART_CHAR_MAP.items():
+        text = text.replace(smart, plain)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Password hashing (PBKDF2-HMAC-SHA256)
+# ---------------------------------------------------------------------------
+
+def hash_password(password: str, salt: str | None = None) -> str:
+    """Hash password with PBKDF2-HMAC-SHA256. Returns 'salt$hash'."""
+    if salt is None:
+        salt = os.urandom(16).hex()
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+    return f"{salt}${dk.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Verify password against stored hash. Supports legacy SHA-256 and PBKDF2."""
+    if "$" in stored:
+        salt, expected_hash = stored.split("$", 1)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+        return dk.hex() == expected_hash
+    else:
+        # Legacy SHA-256 (no salt)
+        return hashlib.sha256(password.encode()).hexdigest() == stored
+
 
 # ---------------------------------------------------------------------------
 # Ollama
@@ -419,6 +484,10 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
     name = service.get("name", url)
     restart_cmd = service.get("restart_cmd", "")
 
+    # Record last check time
+    if bot_state:
+        bot_state.last_watchdog_check = time.time()
+
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
             if r.status < 400:
@@ -482,6 +551,8 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
         backup_path = diag["latest_backup"]
         config_path = str(Path("~/.openclaw/openclaw.json").expanduser())
         log.info(f"Watchdog: {name} config broken, restoring from {backup_path}")
+        send(bot_token, chat_id,
+             f"🔍 *{name}* config is broken — restoring from backup...")
         restore_out, restore_code = run_cmd(f"cp {shlex.quote(backup_path)} {shlex.quote(config_path)}")
         if restore_code != 0:
             send(bot_token, chat_id,
@@ -518,20 +589,28 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
     if "not loaded" in diag.get("process_status", ""):
         load_cmd = "launchctl load ~/Library/LaunchAgents/ai.openclaw.gateway.plist"
         log.info(f"Watchdog: {name} not loaded in launchd, loading...")
-        run_cmd(load_cmd)
-        time.sleep(2)
-        out, code = run_cmd(restart_cmd, timeout=30)
-        time.sleep(5)
-        try:
-            with urllib.request.urlopen(url, timeout=5) as r:
-                if r.status < 400:
-                    send(bot_token, chat_id,
-                         f"🔧 *{name}* wasn't loaded in launchd — reloaded and restarted. Back online.")
-                    return
-        except Exception:
-            pass
         send(bot_token, chat_id,
-             f"⚠️ *{name}* wasn't loaded in launchd — reloaded but still not responding.\n```\n{out}\n```")
+             f"🔍 *{name}* not loaded in launchd — loading and restarting...")
+        run_cmd(load_cmd)
+        time.sleep(3)  # allow launchd to fully load before restart
+        out, code = run_cmd(restart_cmd, timeout=30)
+        # Health check with retry loop
+        is_up = False
+        for attempt in range(5):
+            time.sleep(3)
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    if r.status < 400:
+                        is_up = True
+                        break
+            except Exception:
+                pass
+        if is_up:
+            send(bot_token, chat_id,
+                 f"✅ *{name}* wasn't loaded in launchd — reloaded and restarted. Back online.")
+            return
+        send(bot_token, chat_id,
+             f"⚠️ *{name}* wasn't loaded in launchd — reloaded but still not responding after 15s.\n```\n{out}\n```")
         return
 
     # Restart loop prevention: if restarted 3+ times in 5 minutes, stop and alert
@@ -542,6 +621,9 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
              f"Stopping auto-restart to prevent a loop. Please investigate manually.{error_context}")
         log.warning(f"Watchdog: restart loop detected for {name}, halting auto-restart")
         return
+
+    # Notify user that watchdog detected an issue
+    send(bot_token, chat_id, f"🔍 *{name}* appears down — attempting restart...")
 
     # Case: Try restart, then analyze if it fails
     if not restart_cmd:
@@ -567,6 +649,7 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
     # Restart failed — try openclaw doctor --fix if this is OpenClaw
     if "openclaw" in name.lower():
         log.info(f"Watchdog: {name} restart failed, trying openclaw doctor --fix...")
+        send(bot_token, chat_id, f"⚠️ *{name}* restart didn't work — running `openclaw doctor --fix`...")
         doc_out, doc_code = run_cmd("openclaw doctor --fix", timeout=60)
         if doc_code == 0:
             # Doctor may have fixed something — restart and check
@@ -584,6 +667,7 @@ def watchdog_check(bot_token: str, chat_id: int, service: dict, ollama_url: str 
 
     # Still down — use AI to diagnose and attempt auto-fix
     if ollama_url and ollama_model and ollama_available(ollama_url):
+        send(bot_token, chat_id, f"🤖 *{name}* still down — asking AI for diagnosis...")
         error_context = diag.get("stderr", diag.get("error_log", out))
         ai_prompt = (
             f"OpenClaw gateway failed to restart. Diagnose and give me ONE shell command to fix it.\n\n"
@@ -682,6 +766,7 @@ def _network_monitor(bot_token: str, chat_id: int):
     """Detect network outages and notify on recovery."""
     was_down = False
     down_since = None
+    fail_streak = 0  # consecutive failures — alert only at >= 2
     time.sleep(30)  # initial grace period
     while True:
         try:
@@ -694,12 +779,17 @@ def _network_monitor(bot_token: str, chat_id: int):
                 except Exception:
                     continue
 
-            if not online and not was_down:
-                was_down = True
-                down_since = time.time()
-                log.warning("Network appears down")
+            if not online:
+                fail_streak += 1
+                if fail_streak >= 2 and not was_down:
+                    was_down = True
+                    down_since = time.time()
+                    log.warning(f"Network appears down (failed {fail_streak} consecutive checks)")
+            elif online and not was_down:
+                fail_streak = 0
             elif online and was_down:
                 was_down = False
+                fail_streak = 0
                 duration = time.time() - down_since if down_since else 0
                 if duration < 60:
                     dur_str = f"{int(duration)}s"
@@ -734,7 +824,11 @@ class BotState:
         self.shell_password_hash = cfg.get("shell_password_hash", "")
         # Support legacy plaintext password, but prefer hash
         if not self.shell_password_hash and cfg.get("shell_password"):
-            self.shell_password_hash = hashlib.sha256(cfg["shell_password"].encode()).hexdigest()
+            # Migrate legacy plaintext password to PBKDF2
+            self.shell_password_hash = hash_password(cfg["shell_password"])
+            cfg["shell_password_hash"] = self.shell_password_hash
+            cfg.pop("shell_password", None)
+            save_config(cfg, cfg_path)
         self.pending_auth: dict[str, str] = {}  # callback_id → command (awaiting password)
         self.activation_code: str | None = None
         self.pending_security_mode: str | None = None
@@ -747,8 +841,10 @@ class BotState:
         self.failed_auth_attempts: int = 0
         self.auth_locked_until: float = 0  # timestamp when lockout expires
         self.conversation: list[dict] = []  # rolling context window
-        self.MAX_CONTEXT = 10
+        self.MAX_CONTEXT = 20
         self.update_available: bool = False
+        self.run_history: list[dict] = []  # last 10 /run commands {cmd, time, exit_code}
+        self.last_watchdog_check: float = 0  # timestamp of last watchdog check
 
         # Session unlock: after correct password, stay unlocked for N minutes
         self.shell_session_timeout_min: int = int(cfg.get("shell_session_timeout_min", 10))
@@ -894,6 +990,16 @@ class BotState:
         history.append(now)
         return len(history) >= 3
 
+    def record_run(self, cmd: str, exit_code: int):
+        """Record a /run command in history (last 10)."""
+        self.run_history.append({
+            "cmd": cmd,
+            "time": time.strftime("%H:%M:%S"),
+            "exit_code": exit_code,
+        })
+        if len(self.run_history) > 10:
+            self.run_history = self.run_history[-10:]
+
     def add_to_context(self, role: str, content: str):
         self.conversation.append({"role": role, "content": content})
         if len(self.conversation) > self.MAX_CONTEXT * 2:
@@ -955,7 +1061,9 @@ class BotState:
         # password, which is intentional for AI-suggested diagnostic commands.
         if self.is_safe_command(cmd):
             self.send(f"▶ `{cmd}`")
+            send_typing(self.bot_token, self.allowed_chat_id)
             out, code = run_cmd(cmd, timeout=60)
+            self.record_run(cmd, code)
 
             # For service restart commands, verify health
             restarted_svc = None
@@ -1236,6 +1344,7 @@ def commands_text(skills: dict) -> str:
         "`/status` — machine + service health",
         "`/debug` — full diagnostic checklist",
         "`/run <cmd>` — run shell command",
+        "`/history` — recent command history",
         "`/logs [service] [n]` — tail logs",
         "`/ps` — top processes by CPU",
         "`/net` — network + IPs",
@@ -1310,7 +1419,7 @@ def handle_onboarding(bot: BotState, text: str, chat_id: int, cfg_path: str, mes
         if pw:
             if message_id:
                 delete_message(bot.bot_token, chat_id, message_id)
-            cfg["shell_password_hash"] = hashlib.sha256(pw.encode()).hexdigest()
+            cfg["shell_password_hash"] = hash_password(pw)
             cfg["shell_security"] = SECURITY_PASSWORD
             bot.shell_security = SECURITY_PASSWORD
             bot.shell_password_hash = cfg["shell_password_hash"]
@@ -1363,6 +1472,9 @@ def _show_setup_complete(bot: BotState):
 def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = None):
     text = text.strip()
 
+    # Normalize iOS smart punctuation (em-dash, smart quotes, etc.)
+    text = normalize_smart_chars(text)
+
     # Handle password auth for /run
     if bot.pending_auth and text == "/cancel":
         bot.pending_auth.clear()
@@ -1379,10 +1491,17 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
             return
 
         # Check if this is a password attempt
-        if hashlib.sha256(text.encode()).hexdigest() == bot.shell_password_hash:
+        if verify_password(text, bot.shell_password_hash):
             # Delete the password message from chat
             if message_id:
                 delete_message(bot.bot_token, bot.allowed_chat_id, message_id)
+            # Migrate legacy SHA-256 hash to PBKDF2 on successful auth
+            if "$" not in bot.shell_password_hash:
+                new_hash = hash_password(text)
+                bot.shell_password_hash = new_hash
+                bot.cfg["shell_password_hash"] = new_hash
+                save_config(bot.cfg, bot.cfg_path)
+                log.info("Migrated password hash from SHA-256 to PBKDF2")
             # Correct password — run the most recent pending command
             bot.failed_auth_attempts = 0
             cid = list(bot.pending_auth.keys())[-1]
@@ -1390,7 +1509,9 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
             bot.send(f"🔓 Authenticated. Running: `{cmd}`")
             # Unlock the session so subsequent /run commands don't need password
             bot.unlock_session()
+            send_typing(bot.bot_token, bot.allowed_chat_id)
             out, code = run_cmd(cmd, timeout=60)
+            bot.record_run(cmd, code)
             bot.send_summary(cmd, out, failed=(code != 0), exit_code=code)
             return
         elif not text.startswith("/"):
@@ -1442,11 +1563,22 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
         bot.send(help_text(bot.skills), reply_markup={"inline_keyboard": buttons})
 
     elif text == "/status":
+        send_typing(bot.bot_token, bot.allowed_chat_id)
         status = system_status()
         # Show session unlock status
         if bot.is_session_unlocked():
             remaining = bot.session_remaining_str()
             status += f"\n\n🔓 *Shell session unlocked* ({remaining} remaining)"
+        # Show last watchdog check time
+        if bot.last_watchdog_check > 0:
+            ago = int(time.time() - bot.last_watchdog_check)
+            if ago < 60:
+                ago_str = f"{ago}s ago"
+            elif ago < 3600:
+                ago_str = f"{ago // 60}m ago"
+            else:
+                ago_str = f"{ago // 3600}h {(ago % 3600) // 60}m ago"
+            status += f"\n👀 Last watchdog check: {ago_str}"
         # Check watched services and build buttons for down ones
         services = bot.cfg.get("watched_services", [])
         buttons = []
@@ -1475,6 +1607,7 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
         bot.send(status, reply_markup=markup)
 
     elif text == "/debug":
+        send_typing(bot.bot_token, bot.allowed_chat_id)
         bot.send("🔍 *Running diagnostics...*")
         results = []
         buttons = []
@@ -1546,7 +1679,48 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
         else:
             results.append(f"⚠️ Port {oc_port} not in use")
 
-        # 6. Check recent errors
+        # 6. OpenClaw version
+        ver_out, ver_code = run_cmd("openclaw --version 2>/dev/null || echo 'unknown'")
+        if ver_code == 0 and ver_out.strip() and ver_out.strip() != "unknown":
+            results.append(f"📦 Version: `{ver_out.strip()}`")
+        else:
+            # Try package.json
+            pkg_path = Path("~/.openclaw/package.json").expanduser()
+            if not pkg_path.exists():
+                # Try global npm
+                pkg_out, _ = run_cmd("npm list -g openclaw --depth=0 2>/dev/null | grep openclaw")
+                if pkg_out.strip():
+                    results.append(f"📦 Version: `{pkg_out.strip()}`")
+            else:
+                try:
+                    pkg = json.loads(pkg_path.read_text())
+                    results.append(f"📦 Version: `{pkg.get('version', 'unknown')}`")
+                except Exception:
+                    pass
+
+        # 7. OpenClaw process memory/CPU
+        ps_detail, ps_code = run_cmd("ps aux | grep -i openclaw | grep -v grep | head -1 | awk '{print \"CPU: \"$3\"% MEM: \"$4\"%\"}'")
+        if ps_code == 0 and ps_detail.strip() and "CPU:" in ps_detail:
+            results.append(f"📊 Process: {ps_detail.strip()}")
+
+        # 8. Plugin list
+        oc_config_data = None
+        if oc_config.exists():
+            try:
+                oc_config_data = json.loads(oc_config.read_text())
+            except Exception:
+                pass
+        if oc_config_data:
+            plugins = oc_config_data.get("plugins", oc_config_data.get("skills", {}))
+            if isinstance(plugins, dict) and plugins:
+                enabled = [k for k, v in plugins.items() if isinstance(v, dict) and v.get("enabled", True)]
+                disabled = [k for k, v in plugins.items() if isinstance(v, dict) and not v.get("enabled", True)]
+                plugin_str = ", ".join(f"`{p}`" for p in enabled[:10]) if enabled else "none"
+                results.append(f"🔌 Plugins ({len(enabled)} on, {len(disabled)} off): {plugin_str}")
+            elif isinstance(plugins, list) and plugins:
+                results.append(f"🔌 Plugins: {', '.join(f'`{p}`' for p in plugins[:10])}")
+
+        # 9. Check recent errors
         err_log = Path("~/.openclaw/logs/gateway.err.log").expanduser()
         recent_errors = ""
         if err_log.exists():
@@ -1554,11 +1728,22 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
             if out.strip() and out.strip() != "(no output)":
                 recent_errors = out.strip()
 
+        # 10. Recent gateway log (last 10 lines)
+        gw_log = Path("~/.openclaw/logs/gateway.log").expanduser()
+        recent_log = ""
+        if gw_log.exists():
+            log_out, _ = run_cmd(f"tail -10 {gw_log}")
+            if log_out.strip() and log_out.strip() != "(no output)":
+                recent_log = log_out.strip()
+
         # Build response
         report = "🔍 *Diagnostic Report*\n\n" + "\n".join(results)
 
         if recent_errors:
             report += f"\n\n📋 *Recent errors:*\n```\n{recent_errors[-500:]}\n```"
+
+        if recent_log and not recent_errors:
+            report += f"\n\n📋 *Recent log:*\n```\n{recent_log[-500:]}\n```"
 
         # Add fix buttons based on what's wrong
         if not oc_healthy and config_valid:
@@ -1949,6 +2134,22 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
         except Exception as e:
             bot.send(f"❌ Failed to reload config: `{e}`")
 
+    elif text == "/history":
+        if not bot.run_history:
+            bot.send("No command history yet. Use `/run <cmd>` to run commands.")
+            return
+        lines = ["📜 *Command History* (last 10)\n"]
+        buttons = []
+        for i, entry in enumerate(reversed(bot.run_history)):
+            icon = "✅" if entry["exit_code"] == 0 else "❌"
+            lines.append(f"{icon} `{entry['cmd']}` ({entry['time']})")
+            cid = str(uuid.uuid4())[:8]
+            bot.pending[cid] = entry["cmd"]
+            bot.track_pending(cid)
+            buttons.append([{"text": f"▶ Re-run: {entry['cmd'][:40]}", "callback_data": f"run:{cid}"}])
+        markup = {"inline_keyboard": buttons} if buttons else None
+        bot.send("\n".join(lines), reply_markup=markup)
+
     elif text.startswith("/"):
         bot.send("Unknown command. Try /help")
 
@@ -1961,24 +2162,50 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
                 bot.send_skill_approval(trigger, cmd)
                 return
 
-        # --- Semantic intent detection ---
-        # Before going to AI, check if the user is asking for something
-        # we can handle directly with richer context
+        # --- Natural language shortcuts (work even without AI) ---
         lower = text.lower()
 
+        # "fix openclaw" / "repair openclaw"
+        if any(p in lower for p in ("fix openclaw", "repair openclaw")):
+            bot.send(
+                "🔧 Try running the doctor:\n`/run openclaw doctor --fix`",
+                reply_markup={"inline_keyboard": [
+                    [{"text": "🩺 Run Doctor Fix", "callback_data": "quick:debug"}],
+                ]},
+            )
+            return
+
+        # "restart openclaw" / "openclaw is down"
+        if any(p in lower for p in ("restart openclaw", "openclaw is down", "openclaw down",
+                                     "start openclaw", "reboot openclaw")):
+            handle_message(bot, "/status", cfg_path)  # shows restart button
+            return
+
+        # "disable [plugin]" / "remove [plugin]"
+        import re
+        plugin_match = re.search(r"(?:disable|remove|uninstall)\s+(\S+)", lower)
+        if plugin_match and "openclaw" not in plugin_match.group(1):
+            plugin_name = plugin_match.group(1)
+            bot.send(
+                f"To disable the `{plugin_name}` plugin, edit the OpenClaw config:\n"
+                f"`/run openclaw config set plugins.{plugin_name}.enabled false`\n"
+                f"Then restart: `/run openclaw gateway restart`"
+            )
+            return
+
+        # "whats wrong" / "check openclaw" / "debug"
+        if any(p in lower for p in ("what's wrong", "whats wrong", "check openclaw",
+                                     "openclaw status", "is openclaw")):
+            handle_message(bot, "/debug", cfg_path)
+            return
+
+        # --- AI-powered response ---
         # Gather system context for the AI so it can be smart
         system_context = _gather_system_context(bot)
 
-        # Regular AI chat with full system awareness
-        bot.send("🤔 _Thinking…_")
-        enriched_prompt = (
-            f"User said: {text}\n\n"
-            f"Current system state:\n{system_context}\n\n"
-            f"Help them with what they're asking. If you need to run commands, "
-            f"use CMD: prefix. You can chain multiple diagnostic steps — suggest "
-            f"one at a time."
-        )
+        # Check Ollama availability first
         if not ollama_available(bot.ollama_url):
+            # No AI — suggest relevant buttons based on message content
             buttons = [
                 [{"text": "📊 Status", "callback_data": "quick:status"},
                  {"text": "🔍 Debug", "callback_data": "quick:debug"}],
@@ -1993,11 +2220,39 @@ def handle_message(bot: BotState, text: str, cfg_path: str, message_id: int = No
             )
             return
 
+        # Send typing indicator before AI call
+        send_typing(bot.bot_token, bot.allowed_chat_id)
+        bot.send("🤔 _Thinking…_")
+
+        enriched_prompt = (
+            f"User said: {text}\n\n"
+            f"Current system state:\n{system_context}\n\n"
+            f"Help them with what they're asking. If you need to run commands, "
+            f"use CMD: prefix. You can chain multiple diagnostic steps — suggest "
+            f"one at a time."
+        )
+
         bot.add_to_context("user", text)
         response = ollama_chat(
             bot.ollama_url, bot.ollama_model, bot.system_prompt,
-            bot.conversation[:-1] + [{"role": "user", "content": enriched_prompt}]
+            bot.conversation[:-1] + [{"role": "user", "content": enriched_prompt}],
+            timeout=45,
         )
+
+        # Handle Ollama timeout/failure
+        if response.startswith("(Ollama error:"):
+            buttons = [
+                [{"text": "🔍 Debug", "callback_data": "quick:debug"},
+                 {"text": "🔄 Restart Gateway", "callback_data": "quick:restart_openclaw"}],
+            ]
+            if "openclaw" in lower:
+                buttons.insert(0, [{"text": "🩺 Run Doctor Fix", "callback_data": "quick:debug"}])
+            bot.send(
+                "⏳ AI didn't respond in time. Try these instead:",
+                reply_markup={"inline_keyboard": buttons},
+            )
+            return
+
         bot.add_to_context("assistant", response)
         text_part, cmd = parse_ai_response(response)
         if cmd:
@@ -2121,7 +2376,9 @@ def handle_callback(bot: BotState, chat_id: int, callback_query_id: str, message
             return
         answer_callback(bot.bot_token, callback_query_id, "Running…")
         edit_message(bot.bot_token, chat_id, message_id, f"▶ Running: `{cmd}`")
+        send_typing(bot.bot_token, chat_id)
         out, code = run_cmd(cmd, timeout=60)
+        bot.record_run(cmd, code)
 
         # For service restart commands, verify health and give clean status
         restarted_svc = None
@@ -2304,6 +2561,7 @@ def handle_callback(bot: BotState, chat_id: int, callback_query_id: str, message
             "backup": "/backup",
             "ps": "/ps",
             "update": "/update",
+            "history": "/history",
             "commands": "__commands__",
         }
         if action == "restart_openclaw":
@@ -2501,7 +2759,7 @@ def main():
             if pw != pw2:
                 print("Passwords don't match.")
                 sys.exit(1)
-            cfg["shell_password_hash"] = hashlib.sha256(pw.encode()).hexdigest()
+            cfg["shell_password_hash"] = hash_password(pw)
         save_config(cfg, args.config)
         print(f"✅ Shell access enabled ({args.enable_shell}). Restart ClawDoc to apply.")
         # Send confirmation to Telegram
@@ -2529,7 +2787,7 @@ def main():
             if pw != pw2:
                 print("Passwords don't match.")
                 sys.exit(1)
-            cfg["shell_password_hash"] = hashlib.sha256(pw.encode()).hexdigest()
+            cfg["shell_password_hash"] = hash_password(pw)
             cfg["shell_security"] = "password"
             print("Password set. Shell security mode: password")
         save_config(cfg, args.config)
@@ -2537,8 +2795,18 @@ def main():
         sys.exit(0)
 
     cfg = load_config(args.config)
-    setup_logging(cfg.get("log_file", "~/.local/log/clawdoc.log"))
+    setup_logging(cfg.get("log_file", "~/.local/log/clawdoc.log"),
+                  log_level=cfg.get("log_level", "INFO"))
     log.info("ClawDoc starting...")
+
+    # Validate bot token before starting
+    me = tg_api(cfg["bot_token"], "getMe")
+    if not me or not me.get("ok"):
+        log.error("Bot token is invalid or Telegram API is unreachable. Check your bot_token in config.")
+        print("ERROR: Bot token validation failed. Verify bot_token in config.json", file=sys.stderr)
+        sys.exit(1)
+    bot_username = me.get("result", {}).get("username", "unknown")
+    log.info(f"Bot token valid: @{bot_username}")
 
     bot = BotState(cfg, args.config)
 
@@ -2606,6 +2874,7 @@ def main():
         {"command": "rollback", "description": "Restore a previous config"},
         {"command": "backup", "description": "Snapshot configs now"},
         {"command": "run", "description": "Run a shell command"},
+        {"command": "history", "description": "Recent command history"},
         {"command": "lock", "description": "Re-lock shell session"},
         {"command": "reload", "description": "Re-read config from disk"},
         {"command": "net", "description": "Network status & IPs"},
@@ -2627,19 +2896,35 @@ def main():
         os_name = platform.system()
         machine = platform.machine()
         startup_msg = f"🔧 *ClawDoc is online*\n{hostname} · {os_name} {machine}"
+        startup_buttons = []
         # Health check on startup
         for svc in cfg.get("watched_services", []):
             svc_name = svc.get("name", svc.get("url", "?"))
             url = svc.get("url", "")
+            restart_cmd = svc.get("restart_cmd", "")
             if url:
                 try:
                     with urllib.request.urlopen(url, timeout=3) as r:
-                        icon = "✅" if r.status < 400 else "❌"
+                        is_up = r.status < 400
                 except Exception:
-                    icon = "❌"
+                    is_up = False
+                icon = "✅" if is_up else "❌"
                 startup_msg += f"\n{icon} {svc_name}"
+                # Add fix buttons for DOWN services
+                if not is_up and restart_cmd:
+                    cid = str(uuid.uuid4())[:8]
+                    bot.pending[cid] = restart_cmd
+                    bot.track_pending(cid)
+                    did = str(uuid.uuid4())[:8]
+                    bot.pending[did] = "openclaw doctor --fix"
+                    bot.track_pending(did)
+                    startup_buttons.append([
+                        {"text": f"🔄 Restart {svc_name}", "callback_data": f"run:{cid}"},
+                        {"text": f"🩺 Doctor Fix", "callback_data": f"run:{did}"},
+                    ])
         startup_msg += "\nType /start for commands."
-        bot.send(startup_msg)
+        markup = {"inline_keyboard": startup_buttons} if startup_buttons else None
+        bot.send(startup_msg, reply_markup=markup)
         # Notify about any pending commands that were lost on restart
         bot.send("ℹ️ _Bot restarted. Any pending commands or auth sessions from before the restart were cancelled._")
 
@@ -2868,7 +3153,14 @@ def main():
                     continue
 
                 if text:
-                    log.info(f"Message: {text!r}")
+                    # Scrub passwords from logs: if bot is awaiting auth or
+                    # onboarding password, don't log the actual text
+                    if bot.pending_auth and not text.startswith("/"):
+                        log.info("Message: [password attempt]")
+                    elif not bot.setup_complete and bot.cfg.get("_onboarding_stage") == "password":
+                        log.info("Message: [password setup]")
+                    else:
+                        log.info(f"Message: {text!r}")
                     handle_message(bot, text, args.config, message_id=msg_id)
 
         except KeyboardInterrupt:

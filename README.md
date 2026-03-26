@@ -89,6 +89,7 @@ Config lives at `~/.config/clawdoc/config.json`. Most settings can be changed vi
   "shell_session_timeout_min": 10,
   "watchdog_interval_min": 15,
   "network_monitor": true,
+  "log_level": "INFO",
   "watched_services": [
     {
       "name": "OpenClaw",
@@ -103,20 +104,48 @@ Config lives at `~/.config/clawdoc/config.json`. Most settings can be changed vi
 
 ### New commands
 
+- `/history` — show last 10 commands with one-tap re-run
 - `/lock` — immediately re-lock the shell session (password mode only)
 - `/reload` — re-read config from disk without restarting
+
+### Natural language shortcuts
+
+Common intents are caught before AI, so they work even without Ollama:
+- "fix openclaw" / "repair openclaw" — suggests doctor fix
+- "restart openclaw" / "openclaw is down" — shows restart button
+- "disable [plugin]" — suggests the config edit command
+- "whats wrong" / "check openclaw" — runs diagnostics
 
 ### Session unlock (password mode)
 
 When `shell_security` is `"password"`, entering your password once unlocks the session for `shell_session_timeout_min` minutes (default 10). During this window, `/run` commands only need tap-to-approve, no password. Use `/lock` to re-lock early. The unlock status and time remaining are shown in `/status` and `/settings`.
 
-### Watchdog loop guard
+### Password security
 
-If a service is auto-restarted 3+ times within 5 minutes, ClawDoc stops restarting it and alerts you instead — preventing restart loops from masking the real issue.
+Passwords are hashed with PBKDF2-HMAC-SHA256 (100,000 iterations, random salt). Legacy SHA-256 hashes are automatically upgraded on next successful login.
+
+### Watchdog improvements
+
+- **Loop guard** — if a service is auto-restarted 3+ times within 5 minutes, ClawDoc stops restarting and alerts you instead.
+- **Proactive notifications** — every watchdog action (config restore, restart, doctor fix) sends a Telegram message explaining what was found and what was done.
+- **Network false alarm prevention** — requires 2+ consecutive check failures before declaring the network down.
+- **Last check time** — `/status` shows when the watchdog last ran.
+
+### Enriched diagnostics
+
+`/debug` now shows OpenClaw version, process CPU/memory, enabled plugins, and recent log entries. Down services on startup get one-tap fix buttons.
+
+### Smart character handling
+
+iOS smart punctuation (`--` → em-dash, smart quotes) is automatically normalized, so commands typed on iPhone work correctly.
+
+### Log verbosity
+
+Set `"log_level": "DEBUG"` in config to see verbose logs. Default is `"INFO"`. Routine messages like backup checks are at DEBUG level.
 
 ### Rollback diff preview
 
-The `/rollback` command now shows a "Diff" button alongside each restore option. Tap it to see exactly what will change before restoring.
+The `/rollback` command shows a "Diff" button alongside each restore option. Tap it to see exactly what will change before restoring.
 
 ---
 
